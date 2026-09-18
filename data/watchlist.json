@@ -1,0 +1,19 @@
+{
+  "tickers": [
+    "AAPL",
+    "MSFT",
+    "GOOGL",
+    "AMZN",
+    "NVDA",
+    "META",
+    "TSLA",
+    "AMD",
+    "AVGO",
+    "NFLX"
+  ],
+  "proximity_threshold_pct": 2.0,
+  "earnings_lookback_days": 7,
+  "bounce_lookback_days": 10,
+  "alerted": {}
+}
+
