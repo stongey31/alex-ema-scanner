@@ -1,4 +1,4 @@
-name: Daily Post-Earnings 200 EMA Scan
+name: Daily Moving Average Bounce Scan
 
 # Runs on weekdays a little after the US market close.
 # NOTE (DST caveat): cron times below are in UTC and GitHub Actions cron
@@ -13,6 +13,17 @@ on:
   schedule:
     - cron: "30 21 * * 1-5"
   workflow_dispatch: {}
+
+# Needed so the job can commit data/watchlist.json's "alerted" dedup log
+# back to the repo -- without this the log is lost when the runner shuts
+# down and the same bounce would re-alert every day.
+permissions:
+  contents: write
+
+# Never let two scans overlap and race on the alert log.
+concurrency:
+  group: daily-scan
+  cancel-in-progress: false
 
 jobs:
   scan:
@@ -33,3 +44,17 @@ jobs:
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python runner.py
+
+      - name: Save alert log
+        run: |
+          if git diff --quiet -- data/watchlist.json; then
+            echo "No new alerts; nothing to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/watchlist.json
+          git commit -m "Update alert log [skip ci]"
+          # Pick up any watchlist edits Alex made while the scan was running.
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"

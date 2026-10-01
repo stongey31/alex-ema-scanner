@@ -1,9 +1,18 @@
-# Post-Earnings 200 EMA Scanner
+# Moving Average Bounce Scanner
 
-A small tool that screens a watchlist of mega-cap stocks for one specific
-technical setup, and pings a Discord channel when it finds one:
+A small tool that screens a watchlist of mega-cap stocks for a pullback to a
+key moving average that reversed upward, and pings a Discord channel when it
+finds one. It checks **four separate signals** per ticker:
 
-> **Price recently bounced off its 200-day EMA, shortly after an earnings report.**
+| Signal | Alerts when |
+|---|---|
+| **200 EMA** | Bounce + RSI under 30 during the pullback + earnings report in the last 7 days |
+| **200 SMA** | Bounce + RSI under 30 during the pullback |
+| **50 EMA** | Bounce + RSI under 30 during the pullback |
+| **50 SMA** | Bounce + RSI under 30 during the pullback |
+
+Every alert (and every dashboard row) also shows the current RSI, the lowest
+RSI during the pullback, and the **last and next earnings dates**.
 
 There's a Streamlit dashboard (`app.py`) for browsing the scan interactively,
 and a headless script (`runner.py`) meant to be run once a day by a scheduled
@@ -14,67 +23,101 @@ actual Discord alerts.
 
 ## 1. What it does, and exactly what "bounce" means
 
-### The bounce logic
+### The moving averages
 
-For each ticker, the scanner pulls 1 year of daily price history and computes
-the 200-day EMA over the whole series:
+For each ticker, the scanner pulls **2 years** of daily price history and
+computes four moving averages over the whole series:
 
 ```python
-ema200 = hist['Close'].ewm(span=200, adjust=False).mean()
+ema = hist['Close'].ewm(span=N, adjust=False).mean()   # N = 50 and 200
+sma = hist['Close'].rolling(window=N).mean()           # N = 50 and 200
 ```
 
-Then it looks at the **last 10 trading sessions** (configurable via
+Two years rather than one so the 200-day lines are reliable -- a 200-day SMA
+has no value at all until there are 200 days of data, and a 200-day EMA needs
+a long run-up to settle.
+
+**EMA vs SMA:** the SMA is a plain average of the last N closes. The EMA
+weights recent days more heavily, so it reacts faster. They're tracked as
+separate signals because price often respects one and not the other.
+
+### The bounce logic (same rule for all four averages)
+
+The scanner looks at the **last 10 trading sessions** (configurable via
 `bounce_lookback_days`, includes today) and checks each day's closing price
-against *that day's own* 200 EMA value:
+against *that day's own* value of the moving average:
 
 1. **Touch**: if any of those days closed within **2.0%** (configurable via
-   `proximity_threshold_pct`) of its 200 EMA, the ticker "touched" the
-   average. If more than one day in the window touched, the day with the
-   **lowest close** is used as the reference touch day -- i.e. the deepest
-   point of the pullback.
-2. **Bounce confirmation**: `is_bounce` is only `True` if, in addition to
-   having touched, **today's** close is:
-   - **(a)** above today's 200 EMA, **and**
+   `proximity_threshold_pct`) of the average, the ticker "touched" it. If
+   more than one day in the window touched, the day with the **lowest
+   close** is used as the reference touch day -- the deepest point of the
+   pullback.
+2. **Bounce confirmation**: the bounce only counts if, in addition to having
+   touched, **today's** close is:
+   - **(a)** above today's value of the average, **and**
    - **(b)** higher than the close on that touch day.
 
-Why both conditions? Touching the average alone tells you nothing -- price
-could still be sliding through it on the way down. Requiring today's close to
-be both above the EMA *and* above the touch-day close confirms an actual
-upward reversal off the average: a **pullback to a rising-ish average,
-followed by a bounce upward.**
+Touching the average alone tells you nothing -- price could still be sliding
+through it. Requiring today's close to be both above the line *and* above the
+touch-day close confirms an actual upward reversal: **a pullback to the
+average, followed by a bounce upward.**
 
-This is deliberately **not symmetric**. The mirror-image case -- price
-rallying up into the 200 EMA from below and getting rejected back down -- is
-NOT what this tool looks for, and will not trigger `is_bounce`.
+This is deliberately **not symmetric**. Price rallying up into an average
+from below and getting rejected back down is NOT what this tool looks for.
+
+### The RSI filter
+
+RSI (Relative Strength Index) measures how hard a stock has been bought or
+sold recently, on a 0-100 scale. Under 30 is conventionally "oversold." The
+scanner uses the standard **14-day RSI with Wilder's smoothing** (the same
+calculation TradingView and StockCharts use).
+
+A signal only triggers if RSI dropped **below 30 on any day in the same
+10-session window** -- i.e. somewhere during the pullback -- not necessarily
+today. By the time a bounce is confirmed, RSI has usually already climbed back
+off its low, so requiring RSI under 30 *today* would almost never fire. The
+pattern being caught is "oversold during the pullback, then price reversed."
+
+Both the threshold (`rsi_oversold_threshold`, default 30) and the period
+(`rsi_period`, default 14) are configurable in `data/watchlist.json`.
+
+**Heads-up:** RSI under 30 is a strict filter. Mega caps often pull back to
+their 50- or 200-day lines with RSI only reaching the 30s or 40s, so it can be
+normal to go weeks without an alert. The dashboard shows the price-only
+bounces (the "Bounce?" columns) separately, so you can see near-misses that
+failed only the RSI filter.
 
 ### The earnings logic
 
-`earnings_recent` is `True` if the ticker's most recent **past** earnings
-date (from `yfinance`'s `get_earnings_dates()`) falls within the last **7
+Earnings is a **required condition only for the 200 EMA signal** (that's the
+original post-earnings setup): it needs the most recent **past** earnings
+date (from `yfinance`'s `get_earnings_dates()`) to fall within the last **7
 days** (configurable via `earnings_lookback_days`).
 
+For the other three signals, earnings is **informational only**: the last
+and next earnings dates are shown, but don't affect whether they trigger.
+
 yfinance's earnings-calendar data is known to be inconsistent -- sometimes
-timezone-aware, sometimes not, sometimes empty, sometimes only future
-estimated dates with no history. `screener.py` handles all of that
-defensively: a missing or malformed earnings calendar for one ticker just
-means `earnings_recent = False` / `last_earnings_date = None` for that
-ticker, and never crashes the scan.
+timezone-aware, sometimes not, sometimes empty. `screener.py` handles all of
+that defensively: a missing or malformed earnings calendar for one ticker
+just means no earnings dates for that ticker (and no 200 EMA signal), and
+never crashes the scan.
 
 ### What triggers an alert
 
-A Discord alert fires for a ticker only when **both** are true at the same
-time: `is_bounce` **and** `earnings_recent`.
+See the table at the top. A ticker that triggers more than one signal on the
+same day gets **one** Discord message listing every line it bounced off.
 
 ### Files
 
 | File | Purpose |
 |---|---|
-| `screener.py` | Core analysis engine: pulls price/earnings data, computes the bounce + earnings logic per ticker. |
-| `alerts.py` | Formats and sends a Discord webhook embed for one matching setup. Logs to console instead of sending if no webhook is configured. |
+| `screener.py` | Core analysis engine: pulls price/earnings data, computes the four moving averages, RSI, bounce and earnings logic per ticker. |
+| `alerts.py` | Formats and sends a Discord webhook embed for a ticker's triggered signals. Logs to console instead of sending if no webhook is configured. |
 | `runner.py` | Headless entry point. Reads `data/watchlist.json`, scans it, sends alerts for new matches, updates the "already alerted" log. This is what the scheduled job runs. |
 | `app.py` | Streamlit dashboard for interactive browsing. |
 | `data/watchlist.json` | **The single source of truth** for the automated scan -- see below. |
-| `.github/workflows/daily-scan.yml` | GitHub Actions workflow that runs `runner.py` on a schedule. |
+| `.github/workflows/daily-scan.yml` | GitHub Actions workflow that runs `runner.py` on a schedule and saves the "already alerted" log back to the repo. |
 
 ### `data/watchlist.json` -- the real, persistent watchlist
 
@@ -84,6 +127,8 @@ time: `is_bounce` **and** `earnings_recent`.
   "proximity_threshold_pct": 2.0,
   "earnings_lookback_days": 7,
   "bounce_lookback_days": 10,
+  "rsi_period": 14,
+  "rsi_oversold_threshold": 30,
   "alerted": {}
 }
 ```
@@ -96,10 +141,14 @@ the thresholds, you edit this file directly** (see the setup checklist below
 for exactly how, with no coding tools required).
 
 The `"alerted"` object is a dedup log, maintained automatically by
-`runner.py`: it maps each ticker to the last earnings date it was already
-alerted on, so the same earnings event doesn't spam Discord every day it
-remains within the lookback window. You don't need to touch this field
-yourself.
+`runner.py`. It maps each ticker + signal (e.g. `"AAPL:sma50"`) to the touch
+date of the bounce it already alerted on. As long as that touch date is still
+inside the 10-session window, it's the same pullback and won't alert again,
+so one bounce doesn't spam Discord every day. A fresh pullback later alerts
+normally. An alert is only logged once Discord actually accepted it, so a
+missing or broken webhook never silently swallows an alert. The daily GitHub
+job commits this file back to the repo after each run (you'll see commits
+titled "Update alert log"). You don't need to touch this field yourself.
 
 ---
 

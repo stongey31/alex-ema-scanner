@@ -1,7 +1,9 @@
 # alex-ema-scanner
 
 Personal project for Alex (non-technical, finance background). Screens
-mega-cap tickers for a post-earnings 200 EMA bounce and alerts to Discord.
+mega-cap tickers for bounces off the 50/200 EMA and SMA (four separate
+signals, RSI < 30 filter on all, recent-earnings filter on the 200 EMA only)
+and alerts to Discord.
 See README.md for the full logic definition and setup checklist.
 
 ## Gotchas found while building this
@@ -28,3 +30,17 @@ See README.md for the full logic definition and setup checklist.
   (as happened with the `use_container_width` warning above). If something
   breaks after a redeploy that worked before, check for upstream version
   drift first.
+
+- **The daily GitHub Actions job commits `data/watchlist.json` back to the
+  repo** (the `"alerted"` dedup log) with `[skip ci]`. Without that step the
+  log is lost when the runner shuts down and every bounce re-alerts daily --
+  which is how the original version shipped. Pull before editing locally.
+
+- **`runner.py` only records an alert after `send_alert()` returns True.**
+  Don't move the dedup write ahead of the send; with no webhook configured
+  (or a failed post) the alert would be marked sent and never delivered.
+
+- **RSI is hand-rolled Wilder smoothing** (SMA-seeded, then recursive), not
+  `ewm(alpha=1/14)`. The ewm shortcut seeds differently and drifts from
+  TradingView/StockCharts values. Verified against the StockCharts reference
+  table to within rounding.
