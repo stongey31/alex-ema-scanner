@@ -99,3 +99,24 @@ def make_premarket_bars(
             idx.append(t)
     df = pd.DataFrame(rows, index=pd.DatetimeIndex(idx))
     return df
+
+
+def make_demo_provider(tickers: list[str], now_et: datetime) -> "FakeProvider":
+    """FAKE data for the dashboard demo: the first ~third of tickers look like
+    real hits (big gap, heavy volume), the rest are quiet."""
+    snapshots, bars, daily = {}, {}, {}
+    n_hits = max(1, len(tickers) // 3)
+    for i, t in enumerate(tickers):
+        hit = i < n_hits
+        base = 5.0 + 3 * i
+        prev_close = base
+        price = base * (1.12 + 0.01 * i) if hit else base * 1.005
+        today_vol = 900_000 if hit else 60_000
+        bars[t] = make_premarket_bars(now_et, today_vol, 100_000, price=price)
+        snapshots[t] = {"last_price": price, "last_trade_time": now_et}
+        d = now_et.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
+        daily[t] = pd.DataFrame(
+            {"open": prev_close, "high": prev_close, "low": prev_close, "close": prev_close, "volume": 1e6},
+            index=pd.DatetimeIndex([d]),
+        )
+    return FakeProvider(snapshots, bars, daily=daily)

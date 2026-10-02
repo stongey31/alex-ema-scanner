@@ -22,16 +22,12 @@ from typing import Optional
 
 import pandas as pd
 
-from core.providers.alpaca import AlpacaProvider
+from core.providers.alpaca import NOT_CONFIGURED_MSG, AlpacaProvider
 from core.providers.base import ProviderAuthError, ProviderError, ProviderPermissionError
 from core.scanner_base import RunContext, ScanOutput, Scanner, Signal
 
 log = logging.getLogger("premarket_momentum")
 
-NOT_CONFIGURED_MSG = (
-    "Alpaca API keys are not set up yet. Add ALPACA_API_KEY and ALPACA_API_SECRET "
-    "(see README, 'Turning on the pre-market scanner')."
-)
 FALLBACK_MSG = "Full-market volume not available on this plan; using IEX-only volume (thin, noisy)"
 
 

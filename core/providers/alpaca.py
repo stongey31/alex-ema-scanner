@@ -17,6 +17,11 @@ BASE_URL = "https://data.alpaca.markets"
 CHUNK = 100
 MAX_RETRIES = 3
 
+NOT_CONFIGURED_MSG = (
+    "Alpaca API keys are not set up yet. Add ALPACA_API_KEY and ALPACA_API_SECRET "
+    "(see README, 'Turning on the pre-market scanner')."
+)
+
 
 def _rfc3339(dt: datetime) -> str:
     if dt.tzinfo is None:

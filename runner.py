@@ -1,110 +1,138 @@
 """
-runner.py -- headless entry point for the scheduled scan.
+runner.py -- headless entry point for the scheduled scans.
 
-This is what the GitHub Actions workflow (.github/workflows/daily-scan.yml)
-runs once a day. It reads the REAL, persistent watchlist from
-data/watchlist.json (not anything typed into the Streamlit dashboard --
-that's session-only and separate), scans it, and fires one Discord alert per
-ticker that has at least one NEW triggered signal (see screener.py for the
-four signals and their trigger rules).
+GitHub Actions runs this (see .github/workflows/): `--lane daily` once a day
+after the close, `--lane intraday` in the pre-market window. It reads the REAL,
+persistent settings from data/ (not anything typed into the Streamlit
+dashboard -- that's session-only), runs every enabled scanner in the lane, and
+sends Discord alerts for NEW signals only.
 
-Deduplication: data/watchlist.json's "alerted" map records, per
-"TICKER:signal" key (e.g. "AAPL:sma50"), the touch date of the bounce we
-already alerted on. While that touch date is still inside the current
-bounce lookback window it's the same pullback, so we do NOT re-alert. Once it
-has rolled out of the window, a fresh bounce on that same line alerts again.
-The workflow commits this file back to the repo after each run so the log
-survives between days.
+Deduplication: data/alert_log.json maps scanner id -> "TICKER:signal" -> the
+episode id (e.g. the touch date) we already alerted on. A signal is skipped
+while the stored episode is still >= the signal's episode_start (same episode).
+An alert is recorded only after Discord accepted it, so a missing webhook or a
+failed post never silently swallows an alert.
 """
 
 from __future__ import annotations
 
-import json
+import argparse
 import logging
-from pathlib import Path
+import sys
+from datetime import datetime
 
-from alerts import send_alert
-from screener import scan_watchlist
+from core import dedup
+from core.config import ConfigError, get_universe, load_scanner_config
+from core.notify import post_discord
+from core.registry import BrokenScanner, discover_scanners
+from core.scanner_base import ET, RunContext
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("runner")
 
-WATCHLIST_PATH = Path(__file__).parent / "data" / "watchlist.json"
+
+def _in_window(now: datetime, window: str) -> bool:
+    start_s, end_s = window.split("-")
+    fmt = "%H:%M"
+    start = datetime.strptime(start_s.strip(), fmt).time()
+    end = datetime.strptime(end_s.strip(), fmt).time()
+    return start <= now.time().replace(second=0, microsecond=0) <= end
 
 
-def load_watchlist(path: Path = WATCHLIST_PATH) -> dict:
-    with open(path, "r") as f:
-        return json.load(f)
-
-
-def save_watchlist(config: dict, path: Path = WATCHLIST_PATH) -> None:
-    with open(path, "w") as f:
-        json.dump(config, f, indent=2)
-        f.write("\n")
-
-
-def _already_alerted(alerted: dict, key: str, window_start: str | None) -> bool:
-    """True if this ticker+signal was already alerted for the current pullback."""
-    previous_touch = alerted.get(key)
-    if not previous_touch or not window_start:
+def run_scanner(scanner, alert_log: dict, dry_run: bool) -> bool:
+    """Run one scanner. Returns True if the alert log changed."""
+    cfg = load_scanner_config(scanner)
+    if not cfg.get("enabled", True):
+        log.info("[%s] disabled in config; skipping", scanner.id)
         return False
-    # Same pullback episode: the touch we alerted on is still inside today's window.
-    return previous_touch >= window_start
+    tickers = get_universe(cfg, None)
 
+    log.info("[%s] Scanning %d tickers: %s", scanner.id, len(tickers), ", ".join(tickers))
+    output = scanner.run(tickers, cfg, RunContext())
+    if output.status == "not_configured":
+        log.info("[%s] not configured: %s", scanner.id, output.message)
+        return False
+    if output.status == "error":
+        log.error("[%s] error: %s", scanner.id, output.message)
+        return False
+    if output.message:
+        log.info("[%s] %s", scanner.id, output.message)
 
-def run() -> list[dict]:
-    config = load_watchlist()
-    tickers = config.get("tickers", [])
-    proximity_pct = config.get("proximity_threshold_pct", 2.0)
-    earnings_lookback_days = config.get("earnings_lookback_days", 7)
-    bounce_lookback_days = config.get("bounce_lookback_days", 10)
-    rsi_period = config.get("rsi_period", 14)
-    rsi_threshold = config.get("rsi_oversold_threshold", 30)
-    alerted = config.setdefault("alerted", {})
+    scanner_log = alert_log.setdefault(scanner.id, {})
+    log.info("[%s] %d ticker(s) with at least one signal", scanner.id, len({s.ticker for s in output.signals}))
 
-    log.info("Scanning %d tickers: %s", len(tickers), ", ".join(tickers))
-    results = scan_watchlist(
-        tickers,
-        proximity_pct=proximity_pct,
-        earnings_lookback_days=earnings_lookback_days,
-        bounce_lookback_days=bounce_lookback_days,
-        rsi_period=rsi_period,
-        rsi_threshold=rsi_threshold,
-    )
-
-    matches = [r for r in results if r.get("signals_triggered")]
-    log.info("%d ticker(s) with at least one triggered signal", len(matches))
-
-    sent_any = False
-    for match in matches:
-        ticker = match["ticker"]
-        new_signals = []
-        for key in match["signals_triggered"]:
-            alert_key = f"{ticker}:{key}"
-            if _already_alerted(alerted, alert_key, match.get("window_start")):
-                log.info("Skipping %s: already alerted for touch on %s", alert_key, alerted[alert_key])
-                continue
-            new_signals.append(key)
-
-        if not new_signals:
+    hits: dict[str, list] = {}
+    for s in output.signals:
+        if dedup.is_duplicate(scanner_log, s.key, s.episode_start):
+            log.info("Skipping %s: already alerted for touch on %s", s.key, scanner_log[s.key])
             continue
+        hits.setdefault(s.ticker, []).append(s)
+    if not hits:
+        return False
 
-        # Only log it as alerted once Discord actually accepted it -- otherwise
-        # a missing webhook or a failed post would silently swallow the alert.
-        if not send_alert(match, new_signals):
+    rows_by_ticker: dict[str, dict] = {}
+    for r in output.rows:
+        rows_by_ticker.setdefault(r.get("ticker"), r)
+
+    changed = False
+    for payload, sigs in scanner.build_alert_messages(hits, rows_by_ticker):
+        if dry_run:
+            log.info("[%s] dry run: would send alert for %s", scanner.id, ", ".join(s.key for s in sigs))
             continue
-        for key in new_signals:
-            alerted[f"{ticker}:{key}"] = match["signals"][key]["touch_date"]
-        sent_any = True
+        # Only log it as alerted once Discord actually accepted it.
+        if post_discord(payload, context=f"{scanner.id}: " + ", ".join(s.key for s in sigs)):
+            for s in sigs:
+                scanner_log[s.key] = s.episode_id
+            changed = True
+    return changed
 
-    if sent_any:
-        save_watchlist(config)
-        log.info("Updated %s with new alert log entries", WATCHLIST_PATH)
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description="Run scheduled scans and send Discord alerts.")
+    ap.add_argument("--lane", choices=["daily", "intraday"], default="daily")
+    ap.add_argument("--only", help="run only this scanner id")
+    ap.add_argument("--list", action="store_true", help="list discovered scanners and exit")
+    ap.add_argument("--dry-run", action="store_true", help="no Discord posts, no alert-log writes")
+    ap.add_argument("--et-window", help="HH:MM-HH:MM; exit quietly if the current New York time is outside it")
+    args = ap.parse_args(argv)
+
+    found = discover_scanners()
+    if args.list:
+        for sid, obj in found:
+            if isinstance(obj, BrokenScanner):
+                print(f"{sid}\tBROKEN\t{obj.error}")
+            else:
+                print(f"{sid}\t{obj.lane}\t{obj.name}")
+        return 0
+
+    if args.et_window:
+        now = datetime.now(ET)
+        if not _in_window(now, args.et_window):
+            log.info("Outside ET window %s (now %s ET); nothing to do", args.et_window, now.strftime("%H:%M"))
+            return 0
+
+    alert_log = dedup.load_alert_log()
+    changed = False
+    for sid, obj in found:
+        if isinstance(obj, BrokenScanner):
+            log.error("[%s] could not be loaded: %s", sid, obj.error)
+            continue
+        if obj.lane != args.lane or (args.only and sid != args.only):
+            continue
+        try:
+            changed |= run_scanner(obj, alert_log, args.dry_run)
+        except ConfigError as e:
+            log.error("[%s] config problem: %s", sid, e)
+        except Exception:
+            log.exception("[%s] scanner crashed; continuing with the others", sid)
+
+    if changed and not args.dry_run:
+        dedup.save_alert_log(alert_log)
+        log.info("Updated %s with new alert log entries", dedup.ALERT_LOG_PATH)
     else:
-        log.info("No new alerts fired; watchlist file left unchanged")
-
-    return matches
+        log.info("No new alerts recorded; alert log left unchanged")
+    return 0
 
 
 if __name__ == "__main__":
-    run()
+    sys.exit(main())
