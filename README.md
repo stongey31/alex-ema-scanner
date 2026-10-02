@@ -123,7 +123,7 @@ same day gets **one** Discord message listing every line it bounced off.
 
 ```json
 {
-  "tickers": ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "AMD", "AVGO", "NFLX"],
+  "tickers": ["AAPL", "MSFT", "GOOG", "AMZN", "NVDA", "META", "TSLA", "AMD", "AVGO", "NFLX"],
   "proximity_threshold_pct": 2.0,
   "earnings_lookback_days": 7,
   "bounce_lookback_days": 10,

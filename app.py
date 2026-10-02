@@ -112,7 +112,7 @@ def main():
         default_tickers = defaults.get("tickers", [])
         selected_tickers = st.multiselect(
             "Tickers (session only)",
-            options=sorted(set(default_tickers) | {"AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "AMD", "AVGO", "NFLX"}),
+            options=sorted(set(default_tickers) | {"AAPL", "MSFT", "GOOG", "AMZN", "NVDA", "META", "TSLA", "AMD", "AVGO", "NFLX"}),
             default=default_tickers,
         )
         extra_tickers_raw = st.text_input("Add other tickers (comma-separated)", value="")
