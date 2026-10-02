@@ -1,8 +1,35 @@
-# Moving Average Bounce Scanner
+# Alex's Scanners
 
-A small tool that screens a watchlist of mega-cap stocks for a pullback to a
-key moving average that reversed upward, and pings a Discord channel when it
-finds one. It checks **four separate signals** per ticker:
+A small set of stock scanners with a web dashboard and Discord alerts. Each
+scanner is one file in the `scanners/` folder, so new ones are easy to add
+(see [ADDING_A_SCANNER.md](ADDING_A_SCANNER.md)).
+
+**Two parts:**
+
+- **The dashboard** (`app.py`, hosted on Streamlit Community Cloud): one tab per
+  scanner. Pick tickers, change settings for your session, click **Run**. It
+  is for browsing only: it never sends Discord messages, and nothing you change
+  there is saved.
+- **The scheduled alerts** (`runner.py`, run by GitHub Actions): scans on a
+  schedule and posts to Discord. It only alerts on **new** hits, never the same
+  one twice.
+
+## Scanners
+
+| Scanner | File | Looks for |
+|---|---|---|
+| **Moving Average Bounce** (daily) | `scanners/ma_bounce.py` | A pullback to the 50/200-day EMA/SMA with RSI under 30, then an upward reversal |
+| **Pre-market Momentum** (intraday) | `scanners/premarket_momentum.py` | A gap up of 10%+ before the open on at least 5x the normal volume |
+
+Which tickers each one scans lives in `data/watchlists.json`, and each scanner's
+settings in `data/config/<scanner>.json` (see "Editing settings and watchlists
+on GitHub" below).
+
+---
+
+## Moving Average Bounce
+
+It checks **four separate signals** per ticker:
 
 | Signal | Alerts when |
 |---|---|
@@ -13,15 +40,6 @@ finds one. It checks **four separate signals** per ticker:
 
 Every alert (and every dashboard row) also shows the current RSI, the lowest
 RSI during the pullback, and the **last and next earnings dates**.
-
-There's a Streamlit dashboard (`app.py`) for browsing the scan interactively,
-and a headless script (`runner.py`) meant to be run once a day by a scheduled
-job (GitHub Actions, see `.github/workflows/daily-scan.yml`) that fires the
-actual Discord alerts.
-
----
-
-## 1. What it does, and exactly what "bounce" means
 
 ### The moving averages
 
@@ -79,7 +97,7 @@ off its low, so requiring RSI under 30 *today* would almost never fire. The
 pattern being caught is "oversold during the pullback, then price reversed."
 
 Both the threshold (`rsi_oversold_threshold`, default 30) and the period
-(`rsi_period`, default 14) are configurable in `data/watchlist.json`.
+(`rsi_period`, default 14) are configurable in `data/config/ma_bounce.json`.
 
 **Heads-up:** RSI under 30 is a strict filter. Mega caps often pull back to
 their 50- or 200-day lines with RSI only reaching the 30s or 40s, so it can be
@@ -98,65 +116,135 @@ For the other three signals, earnings is **informational only**: the last
 and next earnings dates are shown, but don't affect whether they trigger.
 
 yfinance's earnings-calendar data is known to be inconsistent -- sometimes
-timezone-aware, sometimes not, sometimes empty. `screener.py` handles all of
+timezone-aware, sometimes not, sometimes empty. `scanners/ma_bounce.py` handles all of
 that defensively: a missing or malformed earnings calendar for one ticker
 just means no earnings dates for that ticker (and no 200 EMA signal), and
 never crashes the scan.
 
 ### What triggers an alert
 
-See the table at the top. A ticker that triggers more than one signal on the
-same day gets **one** Discord message listing every line it bounced off.
+A ticker that triggers more than one signal on the same day gets **one**
+Discord message listing every line it bounced off.
+
+---
+
+## Pre-market momentum scanner
+
+Finds stocks that are **gapping up** before the market opens on **unusually
+heavy volume**.
+
+- **Gap %** = (latest price - yesterday's close) / yesterday's close x 100.
+  The default alert threshold is **10%** (`min_gap_pct`).
+- **RelVol (relative volume)** = the volume traded so far today, divided by the
+  *average* volume traded over the *same stretch of the morning* (from 4:00am ET
+  up to the same clock time) on each of the previous 10 trading days. A RelVol
+  of 5 means "5x the usual volume for this time of day." Default threshold: 5x.
+- A hit also needs a price of at least $1 and at least 50,000 shares traded so
+  far (to skip junk).
+
+**Data and its limits.** Prices and volume come from Alpaca's market-data API:
+
+- Prices use Alpaca's **IEX** feed (a single exchange - good enough for a
+  price).
+- Volume uses the **SIP** feed (the whole market) - but on Alpaca's **free
+  plan, SIP data is delayed ~15 minutes**, so the scanner counts volume only up
+  to 16 minutes ago (`volume_delay_minutes`) and compares it to history up to
+  the same time. If the free plan refuses SIP data entirely, the scanner falls
+  back to **IEX-only volume**, which is a small slice of the real volume (thin
+  and noisy) - the dashboard says so when that happens.
+- With Alpaca's **paid plan (about $99/month, "Algo Trader Plus")** the SIP
+  data is real-time: set `"volume_delay_minutes": 0` in
+  `data/config/premarket_momentum.json`.
+- The watchlist (`momentum` in `data/watchlists.json`) is a fixed list. A
+  **planned next step** is a whole-market mode (like DAS Trader) that scans
+  everything: the scanner already picks its tickers through one small function
+  (`get_universe` in `core/config.py`), so that can be added without changing
+  the scanners.
+
+### Turning on the pre-market scanner
+
+Until you do this, the dashboard tab says "Alpaca API keys are not set up yet"
+(with a clearly labelled **FAKE data** demo) and the scheduled job does nothing.
+
+1. Go to **alpaca.markets** and create a free account. (You do **not** need to
+   fund it or trade; the free plan's **Market Data "Basic"** is enough to start.)
+2. In the Alpaca dashboard, generate an **API key** and **secret**. (Keys from a
+   paper-trading account work fine for market data.) Copy both somewhere safe -
+   the secret is only shown once.
+3. Add the keys in **both** places (same idea as the Discord webhook below):
+   - **Streamlit**: your app on share.streamlit.io -> **⋮** -> **Settings** ->
+     **Secrets**, add:
+     ```
+     ALPACA_API_KEY = "paste-the-key-here"
+     ALPACA_API_SECRET = "paste-the-secret-here"
+     ```
+     and **Save**.
+   - **GitHub**: repository -> **Settings** -> **Secrets and variables** ->
+     **Actions** -> **New repository secret**. Add one named `ALPACA_API_KEY` and
+     another named `ALPACA_API_SECRET`.
+
+### When the scheduled alerts run - honest limits
+
+- **Daily scan:** weekdays at about 4:30-5:30pm ET (see the timing note below).
+- **Pre-market scan:** weekdays, two schedules (12:00 and 13:00 UTC) so one of
+  them lands around 8:00am ET in both summer and winter time; it only acts if
+  it is between 7:45 and 9:29am ET.
+- GitHub's schedules are **best-effort**: runs are often **delayed** by several
+  minutes (sometimes much more). This is **not a real-time, minute-by-minute
+  scanner** - think "a look at the pre-market once or twice a morning."
+- The dashboard can **auto-refresh every minute, but only while the page is open**
+  (toggle "Auto-refresh while this page is open"; it's off by default).
+- True always-on alerting (a server watching the market all morning) is out of
+  scope for this setup.
+- **GitHub switches off scheduled workflows after 60 days with no activity in
+  the repo.** If alerts stop, open the repository's **Actions** tab, click the
+  workflow in the left list, and press **Enable workflow**. (Any commit, such as
+  the automatic "Update alert log" ones, also counts as activity.)
+
+---
 
 ### Files
 
 | File | Purpose |
 |---|---|
-| `screener.py` | Core analysis engine: pulls price/earnings data, computes the four moving averages, RSI, bounce and earnings logic per ticker. |
-| `alerts.py` | Formats and sends a Discord webhook embed for a ticker's triggered signals. Logs to console instead of sending if no webhook is configured. |
-| `runner.py` | Headless entry point. Reads `data/watchlist.json`, scans it, sends alerts for new matches, updates the "already alerted" log. This is what the scheduled job runs. |
-| `app.py` | Streamlit dashboard for interactive browsing. |
-| `data/watchlist.json` | **The single source of truth** for the automated scan -- see below. |
-| `.github/workflows/daily-scan.yml` | GitHub Actions workflow that runs `runner.py` on a schedule and saves the "already alerted" log back to the repo. |
+| `app.py` | The dashboard (one tab per scanner). |
+| `runner.py` | Headless entry point the scheduled jobs run (`--lane daily` or `--lane intraday`). |
+| `scanners/` | One file per scanner. `scanners/_template.py` is the starting point for a new one. |
+| `core/` | Shared plumbing (settings, alert memory, Discord, Alpaca, charts). You shouldn't need to touch it. |
+| `data/watchlists.json` | Named lists of tickers (`mega_caps`, `momentum`, ...). |
+| `data/config/<scanner>.json` | Settings for one scanner (optional; defaults live in the scanner file). |
+| `data/alert_log.json` | The "already alerted" memory, maintained automatically. **Never edit it.** |
+| `.github/workflows/` | The scheduled jobs (`daily-scan.yml`, `premarket-scan.yml`). |
 
-### `data/watchlist.json` -- the real, persistent watchlist
+### Editing settings and watchlists on GitHub
 
-```json
-{
-  "tickers": ["AAPL", "MSFT", "GOOG", "AMZN", "NVDA", "META", "TSLA", "AMD", "AVGO", "NFLX"],
-  "proximity_threshold_pct": 2.0,
-  "earnings_lookback_days": 7,
-  "bounce_lookback_days": 10,
-  "rsi_period": 14,
-  "rsi_oversold_threshold": 30,
-  "alerted": {}
-}
-```
+No coding tools needed. On github.com:
 
-This file is what `runner.py` (the automated daily scan) always reads. It is
-**not** the same as anything typed into the Streamlit dashboard's sidebar --
-those changes are session-only, for browsing, and are thrown away when the
-browser tab closes. **To permanently change which tickers are monitored, or
-the thresholds, you edit this file directly** (see the setup checklist below
-for exactly how, with no coding tools required).
+1. Open the repository -> the `data` folder -> `watchlists.json` (to change
+   tickers) or `config` -> `ma_bounce.json` / `premarket_momentum.json` (to change
+   thresholds).
+2. Click the pencil (✏️) icon, edit, and click **Commit changes**.
+3. Tickers must be in double quotes and comma-separated, like `"AAPL", "MSFT"`.
+   A typo shows up as a ⚠ tab on the dashboard naming the file and line.
+4. To turn a scanner off, set `"enabled": false` in its config file.
 
-The `"alerted"` object is a dedup log, maintained automatically by
-`runner.py`. It maps each ticker + signal (e.g. `"AAPL:sma50"`) to the touch
-date of the bounce it already alerted on. As long as that touch date is still
-inside the 10-session window, it's the same pullback and won't alert again,
-so one bounce doesn't spam Discord every day. A fresh pullback later alerts
-normally. An alert is only logged once Discord actually accepted it, so a
-missing or broken webhook never silently swallows an alert. The daily GitHub
-job commits this file back to the repo after each run (you'll see commits
-titled "Update alert log"). You don't need to touch this field yourself.
+The scheduled jobs and the dashboard pick up changes on their next run/reload.
+**Do not edit `data/alert_log.json`** - the scanners manage it. The Moving
+Average Bounce alert log works like this: for each ticker + signal (e.g.
+`"AAPL:sma50"`) it remembers the touch date of the bounce already alerted. While
+that touch date is still inside the 10-session window it's the same pullback and
+won't alert again; a fresh pullback later alerts normally. An alert is only
+logged once Discord actually accepted it, so a missing or broken webhook never
+silently swallows an alert. The pre-market scanner alerts at most once per
+ticker per day.
 
 ---
 
-## 2. One-time setup checklist -- from this code to a live, working tool
+## One-time setup checklist -- from this code to a live, working tool
 
 This section assumes **zero prior experience** with GitHub, Streamlit, or
 Discord webhooks. Follow it top to bottom once, and you'll have a live
-dashboard plus daily automated Discord alerts.
+dashboard plus automated Discord alerts.
 
 ### Step 1: Create a GitHub account (skip if Alex already has one)
 
@@ -183,7 +271,8 @@ This step is normally done by whoever is comfortable with git/command line
 3. Click **New app** (sometimes labeled **Create app**).
 4. Choose the GitHub repository from Step 2, choose the `main` branch, and
    set the "Main file path" to `app.py`.
-5. Click **Deploy**. Streamlit will install everything from
+5. Click **Advanced settings** and choose **Python 3.12**.
+6. Click **Deploy**. Streamlit will install everything from
    `requirements.txt` automatically and give you a public URL for the
    dashboard (looks like `https://your-app-name.streamlit.app`).
 
@@ -227,8 +316,8 @@ the daily automated alert, since `runner.py` runs there):
    secret**.
 
 Once both are set, the daily GitHub Actions workflow
-(`.github/workflows/daily-scan.yml`) will run `runner.py` automatically on
-weekdays and post real Discord alerts.
+(`.github/workflows/daily-scan.yml`) will run `runner.py --lane daily`
+automatically on weekdays and post real Discord alerts.
 
 > **Note on timing**: the schedule is set to 21:30 UTC, which is
 > approximately 4:30-5:30pm US Eastern Time depending on the time of year
@@ -236,43 +325,29 @@ weekdays and post real Discord alerts.
 > Saving Time). Being off by an hour twice a year is harmless for this use
 > case.
 
-### Step 6: How to change the watchlist or thresholds later (no coding needed)
 
-Alex can do this himself, entirely from the GitHub website, whenever he wants
-to add/remove a ticker or tweak a threshold:
-
-1. Go to the repository on github.com.
-2. Click on `data` folder, then click `watchlist.json`.
-3. Click the pencil (✏️) icon in the top right to edit the file.
-4. Edit the tickers list (must be in quotes, comma-separated, like
-   `"AAPL", "MSFT"`) and/or the number values for the thresholds.
-5. Scroll down and click **Commit changes**.
-
-That's it -- the next scheduled run (or the dashboard's next redeploy) will
-pick up the new settings automatically. Do **not** edit the `"alerted"`
-section; the scanner manages that automatically to avoid duplicate alerts.
-
----
-
-## Running it locally (for Mike / development)
+## Developing locally
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 
-# Dashboard:
-streamlit run app.py
-
-# One-off headless scan (uses data/watchlist.json, alerts to Discord or console):
-python runner.py
+streamlit run app.py              # dashboard
+python runner.py --list           # list scanners
+python runner.py --lane daily --dry-run   # scan, but no Discord / no log writes
+pytest -q                         # offline tests (add -m live for the network check)
 ```
 
-Create a local `.env` file (not committed, see `.gitignore`) with:
+Create a local `.env` file (not committed, see `.gitignore`) with any of:
 
 ```
-DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
+DISCORD_WEBHOOK_URL=...
+ALPACA_API_KEY=...
+ALPACA_API_SECRET=...
 ```
 
-If `DISCORD_WEBHOOK_URL` is unset, alerts are logged to the console instead
-of failing.
+If `DISCORD_WEBHOOK_URL` is unset, alerts are logged to the console instead of
+failing. `requirements.txt` pins exact versions (except `yfinance`, which only
+has a minimum so Yahoo-compatibility fixes get picked up). The app targets
+Python 3.12.
