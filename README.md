@@ -155,11 +155,56 @@ heavy volume**.
 - With Alpaca's **paid plan (about $99/month, "Algo Trader Plus")** the SIP
   data is real-time: set `"volume_delay_minutes": 0` in
   `data/config/premarket_momentum.json`.
-- The watchlist (`momentum` in `data/watchlists.json`) is a fixed list. A
-  **planned next step** is a whole-market mode (like DAS Trader) that scans
-  everything: the scanner already picks its tickers through one small function
-  (`get_universe` in `core/config.py`), so that can be added without changing
-  the scanners.
+
+### Whole-market mode (the default)
+
+Like DAS Trader's scanner, it doesn't use a fixed list. Each run works in two stages:
+
+1. **Sweep.** It asks Alpaca for every tradable US stock (~12,700 symbols, plain
+   tickers only: no warrants/rights/units), then fetches the latest price of all
+   of them (about 26 calls, ~10 seconds). It keeps only **gappers**: last trade
+   today and within the last 30 minutes, price at least $1, and up **10% or more**
+   from the previous close. The biggest 60 gappers move on.
+2. **Volume check.** For just those survivors it does the RelVol check described
+   above. A stock is flagged only if RelVol >= 5x **and** the gap is >= 10% **and**
+   the price/volume floors pass. If the volume-based previous close disagrees with
+   the sweep's by more than 20% (usually a stock split) the row says
+   "prev close mismatch (split?)" and is never flagged.
+
+The result lists only the stocks that reached stage 2, with a summary such as
+*"Swept 12,687 symbols; 14 gapped >=10%; 3 flagged"*.
+
+**Free-plan limits (honest version):**
+
+- Prices come from the **IEX** feed (real time, but one exchange, so thin).
+  Volume comes from the **SIP** feed and is **delayed ~15 minutes**.
+- Alpaca allows **200 calls per minute**. One sweep is ~26 calls, so don't
+  auto-refresh aggressively (auto-refresh is **off** by default; each refresh
+  costs ~26 calls).
+- **After-hours / very early numbers are noisy:** IEX prints are thin, and stock
+  splits can look like 700-3000% "gaps". That's why stage 2 must confirm.
+- The Alpaca keys are **paper-trading keys that only read market data**. This
+  tool cannot place trades.
+- There is no ETF filter (the assets list can't tell ETFs apart reliably).
+
+**Switching back to a fixed list:** set `"universe_mode": "watchlist"` in
+`data/config/premarket_momentum.json` (it then scans the `momentum` list in
+`data/watchlists.json`). On the dashboard you can also change "Universe" in the
+tab's Settings (this session only).
+
+| Setting (`data/config/premarket_momentum.json`) | Default | Meaning |
+|---|---|---|
+| `universe_mode` | `"whole_market"` | `"whole_market"` or `"watchlist"` |
+| `watchlist` | `"momentum"` | List used in watchlist mode |
+| `assets_base_url` | `https://paper-api.alpaca.markets` | Alpaca Trading API host that lists tradable stocks |
+| `min_gap_pct` | `10.0` | Minimum gap vs. previous close (%) |
+| `min_rel_volume` | `5.0` | Minimum RelVol (x) |
+| `min_price` | `1.0` | Minimum price, also used in the sweep |
+| `min_volume` | `50000` | Minimum shares traded so far |
+| `max_stage2_candidates` | `60` | How many top gappers get the volume check |
+| `min_trade_age_minutes` | `30` | Sweep ignores symbols whose last trade is older than this |
+| `volume_delay_minutes` | `16` | Volume delay (0 on a paid plan) |
+| `lookback_days` / `min_history_days` | `10` / `5` | Sessions averaged for RelVol |
 
 ### Turning on the pre-market scanner
 
@@ -169,7 +214,7 @@ Until you do this, the dashboard tab says "Alpaca API keys are not set up yet"
 1. Go to **alpaca.markets** and create a free account. (You do **not** need to
    fund it or trade; the free plan's **Market Data "Basic"** is enough to start.)
 2. In the Alpaca dashboard, generate an **API key** and **secret**. (Keys from a
-   paper-trading account work fine for market data.) Copy both somewhere safe -
+   paper-trading account work fine for market data, and can't trade for you here.) Copy both somewhere safe -
    the secret is only shown once.
 3. Add the keys in **both** places (same idea as the Discord webhook below):
    - **Streamlit**: your app on share.streamlit.io -> **⋮** -> **Settings** ->

@@ -16,8 +16,10 @@ volume (Alpaca data). See README.md for the logic definitions and setup checklis
   a "⚠" tab / `BROKEN` line, never a crash (`core/registry.py`).
 - Settings: `default_config` in the class, overridden by `data/config/<id>.json`
   (`"enabled": false` turns it off). Tickers: `data/watchlists.json`, chosen via
-  `get_universe(cfg, provider)` in `core/config.py` (hook for a future
-  whole-market mode).
+  `core.config.get_universe` (watchlist only). The pre-market scanner's
+  `universe_mode` defaults to `whole_market`: its `run()` ignores `tickers` and
+  builds the universe itself via `scanners.premarket_momentum.get_universe`
+  (`provider.list_symbols`); in `"watchlist"` mode it uses the passed tickers.
 - Alert dedup lives in `data/alert_log.json` (`{scanner_id: {"TICKER:signal":
   episode_id}}`), written by `runner.py` only after `post_discord()` returns True.
   The old `"alerted"` map in `data/watchlist.json` was migrated here.
@@ -72,10 +74,24 @@ volume (Alpaca data). See README.md for the logic definitions and setup checklis
   `setting_meta` min/max/step to the type of the current value (e.g. the int
   `rsi_oversold_threshold: 30` with float-looking limits would otherwise raise).
 
-- **Alpaca specifics are unverified assumptions** (no keys existed while
-  building): snapshot/bars JSON shapes, free-plan SIP being delayed ~15 min,
-  IEX pre-market coverage. `core/providers/alpaca.py` parses defensively and
-  tests use canned responses only. Re-check against real responses once keys exist.
+- **Alpaca specifics**: the whole-market facts below were checked live (after
+  hours) by Mike's assistant with paper keys; tests still use canned responses
+  only. Still unverified: real pre-market IEX coverage, real 429 behaviour, and
+  how Streamlit Cloud copes with ~26 sequential calls per run.
+- **Pre-market previous-close trap.** In a snapshot, `dailyBar` may be absent or
+  be *yesterday's* bar, in which case `prevDailyBar` is the day *before*
+  yesterday. Never read `prevDailyBar` blindly: use `pick_prev_close()`, which
+  keeps bars dated strictly before today (ET) and takes the latest one.
+- **`feed=sip` on snapshots returns 403** ("subscription does not permit
+  querying recent SIP data") on the free plan, while SIP *bars* older than
+  ~15 min work. So price/gap = IEX snapshots, volume = delayed SIP bars.
+- **The assets list is on the Trading API host** (`paper-api.alpaca.markets`,
+  `/v2/assets`), not `data.alpaca.markets`; same key headers. Configurable via
+  `assets_base_url`; cached 12 h per process (`_ASSETS_CACHE`). Snapshot chunks
+  are 500 symbols, sequential, 429 retried with backoff. Raw IEX gaps are noisy
+  (splits look like 700-3000%), so stage 2 re-checks prev close against split-
+  adjusted SIP daily bars (>20% off => "prev close mismatch (split?)", not flagged).
+  No ETF filter exists (not reliably derivable from the assets endpoint).
 
 - **Pre-market history only counts sessions that have bars in the window.** A
   past session with zero IEX/SIP bars before the cutoff is absent from the
