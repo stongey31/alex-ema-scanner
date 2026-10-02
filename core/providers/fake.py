@@ -2,32 +2,46 @@
 
 from __future__ import annotations
 
+import itertools
+import string
 from datetime import datetime, timedelta
 from typing import Optional
 
 import numpy as np
 import pandas as pd
 
-from core.providers.base import IntradayProvider, ProviderPermissionError
+from core.providers.base import IntradayProvider, ProviderError, ProviderPermissionError
 from core.scanner_base import ET
 
 
 class FakeProvider(IntradayProvider):
     name = "fake"
 
-    def __init__(self, snapshots: dict, bars: dict, configured: bool = True, permission_error_feeds=(), daily: Optional[dict] = None):
+    def __init__(self, snapshots: dict, bars: dict, configured: bool = True, permission_error_feeds=(), daily: Optional[dict] = None,
+                 universe: Optional[list] = None, failing_snapshot_calls=()):
         self._snapshots = snapshots
         self._bars = bars
         self._daily = daily or {}
         self._configured = configured
         self.permission_error_feeds = tuple(permission_error_feeds)
+        self.universe = list(universe) if universe is not None else []
+        self.failing_snapshot_calls = set(failing_snapshot_calls)  # 0-based snapshot call numbers that raise ProviderError
+        self.snapshot_sizes: list[int] = []
         self.calls: list[tuple] = []
+
+    def list_symbols(self, base_url=None):
+        self.calls.append(("list_symbols",))
+        return list(self.universe)
 
     def is_configured(self) -> bool:
         return self._configured
 
     def snapshots(self, symbols, feed="iex"):
         self.calls.append(("snapshots", feed))
+        n = len(self.snapshot_sizes)
+        self.snapshot_sizes.append(len(symbols))
+        if n in self.failing_snapshot_calls:
+            raise ProviderError("simulated chunk failure")
         if feed in self.permission_error_feeds:
             raise ProviderPermissionError("feed not allowed")
         return {s: self._snapshots[s] for s in symbols if s in self._snapshots}
@@ -120,3 +134,30 @@ def make_demo_provider(tickers: list[str], now_et: datetime) -> "FakeProvider":
             index=pd.DatetimeIndex([d]),
         )
     return FakeProvider(snapshots, bars, daily=daily)
+
+
+def make_demo_universe_provider(now_et: datetime, n_symbols: int = 300, n_hits: int = 3, n_thin_gappers: int = 3) -> "FakeProvider":
+    """FAKE whole-market demo: ~n_symbols made-up tickers, a few real-looking hits
+    (10%+ gap on heavy volume), a few gappers on thin volume, the rest quiet."""
+    symbols = ["".join(p) for p in itertools.islice(itertools.product(string.ascii_uppercase, repeat=3), n_symbols)]
+    prev_day = (now_et - timedelta(days=1)).replace(hour=4, minute=0, second=0, microsecond=0)
+    day_before = prev_day - timedelta(days=1)
+    snapshots, bars, daily = {}, {}, {}
+    for i, t in enumerate(symbols):
+        prev_close = 5.0 + (i % 40)
+        hit, thin = i < n_hits, n_hits <= i < n_hits + n_thin_gappers
+        price = prev_close * (1.15 + 0.02 * i) if hit else prev_close * 1.12 if thin else prev_close * 1.01
+        snapshots[t] = {
+            "last_price": price,
+            "last_trade_time": now_et - timedelta(minutes=2),
+            "dailyBar": {"t": prev_day.isoformat(), "c": prev_close},
+            "prevDailyBar": {"t": day_before.isoformat(), "c": prev_close},
+        }
+        if hit or thin:
+            bars[t] = make_premarket_bars(now_et, 900_000 if hit else 60_000, 100_000, price=price)
+            d = prev_day.replace(hour=0)
+            daily[t] = pd.DataFrame(
+                {"open": prev_close, "high": prev_close, "low": prev_close, "close": prev_close, "volume": 1e6},
+                index=pd.DatetimeIndex([d]),
+            )
+    return FakeProvider(snapshots, bars, daily=daily, universe=symbols)

@@ -14,13 +14,33 @@ from core.scanner_base import ET
 from core.secrets import get_secret
 
 BASE_URL = "https://data.alpaca.markets"
-CHUNK = 100
+ASSETS_BASE_URL = "https://paper-api.alpaca.markets"  # Trading API host: the assets list lives here, not on the data host
+CHUNK = 100  # bars
+SNAPSHOT_CHUNK = 500
 MAX_RETRIES = 3
+ASSETS_TTL_SECONDS = 12 * 3600
+EXCHANGES = {"NYSE", "NASDAQ", "AMEX", "ARCA", "BATS"}
+
+# base_url -> (fetched_at, symbols). Module-level so Streamlit reruns share it.
+_ASSETS_CACHE: dict[str, tuple[float, list[str]]] = {}
 
 NOT_CONFIGURED_MSG = (
     "Alpaca API keys are not set up yet. Add ALPACA_API_KEY and ALPACA_API_SECRET "
     "(see README, 'Turning on the pre-market scanner')."
 )
+
+
+def filter_assets(assets) -> list[str]:
+    """Tradable plain-ticker US stocks: drops warrants/rights/units (dots, digits) and odd exchanges."""
+    out = set()
+    for a in assets or []:
+        try:
+            sym = str(a.get("symbol") or "").upper()
+            if a.get("tradable") and a.get("exchange") in EXCHANGES and sym.isalpha() and sym.isascii() and len(sym) <= 5:
+                out.add(sym)
+        except AttributeError:
+            continue
+    return sorted(out)
 
 
 def _rfc3339(dt: datetime) -> str:
@@ -39,11 +59,11 @@ class AlpacaProvider(IntradayProvider):
     def is_configured(self) -> bool:
         return bool(self._key and self._secret)
 
-    def _get(self, path: str, params: dict) -> dict:
+    def _get(self, path: str, params: dict, base: str = BASE_URL):
         headers = {"APCA-API-KEY-ID": self._key, "APCA-API-SECRET-KEY": self._secret}
         for attempt in range(MAX_RETRIES + 1):
             try:
-                resp = requests.get(BASE_URL + path, params=params, headers=headers, timeout=10)
+                resp = requests.get(base.rstrip("/") + path, params=params, headers=headers, timeout=10)
             except requests.RequestException as e:
                 # Don't include the exception text: it can echo request details.
                 raise ProviderError(f"Could not reach Alpaca ({type(e).__name__})") from None
@@ -70,10 +90,22 @@ class AlpacaProvider(IntradayProvider):
         except ValueError:
             raise ProviderError("Alpaca returned an unreadable response") from None
 
+    def list_symbols(self, base_url: Optional[str] = None) -> list[str]:
+        base = base_url or ASSETS_BASE_URL
+        hit = _ASSETS_CACHE.get(base)
+        if hit and time.time() - hit[0] < ASSETS_TTL_SECONDS:
+            return list(hit[1])
+        data = self._get("/v2/assets", {"status": "active", "asset_class": "us_equity"}, base=base)
+        if not isinstance(data, list):
+            raise ProviderError("Alpaca returned an unexpected assets response")
+        symbols = filter_assets(data)
+        _ASSETS_CACHE[base] = (time.time(), symbols)
+        return list(symbols)
+
     def snapshots(self, symbols: list[str], feed: str = "iex") -> dict[str, dict]:
         out: dict[str, dict] = {}
-        for i in range(0, len(symbols), CHUNK):
-            chunk = symbols[i : i + CHUNK]
+        for i in range(0, len(symbols), SNAPSHOT_CHUNK):
+            chunk = symbols[i : i + SNAPSHOT_CHUNK]
             data = self._get("/v2/stocks/snapshots", {"symbols": ",".join(chunk), "feed": feed})
             snaps = data.get("snapshots", data) if isinstance(data, dict) else {}
             for sym, snap in (snaps or {}).items():
@@ -84,7 +116,16 @@ class AlpacaProvider(IntradayProvider):
                 except (ValueError, TypeError):
                     ts = None
                 p = trade.get("p")
-                out[sym] = {"last_price": float(p) if p is not None else None, "last_trade_time": ts}
+                try:
+                    price = float(p) if p is not None else None
+                except (ValueError, TypeError):
+                    price = None
+                out[sym] = {
+                    "last_price": price,
+                    "last_trade_time": ts,
+                    "dailyBar": (snap or {}).get("dailyBar"),
+                    "prevDailyBar": (snap or {}).get("prevDailyBar"),
+                }
         return out
 
     def bars(self, symbols, start, end, timeframe="5Min", feed="sip", adjustment="raw") -> dict:

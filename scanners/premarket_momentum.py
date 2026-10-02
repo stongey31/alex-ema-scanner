@@ -9,6 +9,12 @@ same clock time.
 
 Gap % = (latest price - previous close) / previous close * 100.
 
+Two universe modes:
+  * "watchlist": scan the configured tickers (cheap, one pass).
+  * "whole_market" (default): like DAS Trader's scanner. Stage 1 sweeps every
+    tradable US stock's IEX snapshot (~26 calls) and keeps only gappers; stage 2
+    runs the RelVol check on the (capped) survivors only.
+
 A ticker is flagged when RelVol, gap, price and raw volume all clear their
 minimums (see default_config).
 """
@@ -22,13 +28,100 @@ from typing import Optional
 
 import pandas as pd
 
+from core.config import resolve_tickers
 from core.providers.alpaca import NOT_CONFIGURED_MSG, AlpacaProvider
 from core.providers.base import ProviderAuthError, ProviderError, ProviderPermissionError
-from core.scanner_base import RunContext, ScanOutput, Scanner, Signal
+from core.scanner_base import ET, RunContext, ScanOutput, Scanner, Signal
 
 log = logging.getLogger("premarket_momentum")
 
 FALLBACK_MSG = "Full-market volume not available on this plan; using IEX-only volume (thin, noisy)"
+
+
+STAGE1_CHUNK = 500
+PREV_CLOSE_MISMATCH = 0.20
+MISMATCH_MSG = "prev close mismatch (split?)"
+
+
+def _to_et(value) -> Optional[datetime]:
+    """Parse a datetime/ISO string to tz-aware America/New_York (naive is taken as ET)."""
+    if value is None or value == "":
+        return None
+    try:
+        ts = pd.Timestamp(value)
+    except (ValueError, TypeError):
+        return None
+    if pd.isna(ts):
+        return None
+    ts = ts.tz_localize(ET) if ts.tzinfo is None else ts.tz_convert(ET)
+    return ts.to_pydatetime()
+
+
+def pick_prev_close(snapshot: dict, today_et) -> Optional[float]:
+    """Previous session's close from an Alpaca snapshot, safe before the open.
+
+    Pre-market, `dailyBar` may be missing or be YESTERDAY's bar, and then
+    `prevDailyBar` is the day before yesterday. So look at both bars, keep those
+    dated strictly before today (ET) and take the close of the latest one.
+    """
+    best = None  # (date, close)
+    for key in ("dailyBar", "prevDailyBar"):
+        bar = (snapshot or {}).get(key)
+        if not isinstance(bar, dict):
+            continue
+        ts = _to_et(bar.get("t"))
+        try:
+            close = float(bar.get("c"))
+        except (TypeError, ValueError):
+            continue
+        if ts is None or not math.isfinite(close) or close <= 0 or ts.date() >= today_et:
+            continue
+        if best is None or ts.date() > best[0]:
+            best = (ts.date(), close)
+    return best[1] if best else None
+
+
+def stage1_candidates(snaps: dict, cfg: dict, now_et: datetime) -> list[dict]:
+    """Cheap sweep filter on IEX snapshots. Returns ALL gappers ranked by gap (the caller applies max_stage2_candidates).
+
+    Each item: {"ticker", "last_price", "prev_close", "gap_pct"}. Odd/missing
+    fields skip the symbol silently. Snapshot volume is deliberately unused.
+    """
+    today = now_et.date()
+    max_age = timedelta(minutes=float(cfg["min_trade_age_minutes"]))
+    out = []
+    for sym, snap in snaps.items():
+        try:
+            price = snap.get("last_price")
+            traded = _to_et(snap.get("last_trade_time"))
+            if price is None or traded is None:
+                continue
+            price = float(price)
+            if not math.isfinite(price) or price < float(cfg["min_price"]):
+                continue
+            if traded.date() != today or now_et - traded > max_age:
+                continue
+            prev = pick_prev_close(snap, today)
+            if prev is None:
+                continue
+            gap = (price - prev) / prev * 100.0
+            if gap >= float(cfg["min_gap_pct"]):
+                out.append({"ticker": sym, "last_price": price, "prev_close": prev, "gap_pct": gap})
+        except Exception:  # one odd snapshot must not stop the sweep
+            continue
+    out.sort(key=lambda c: c["gap_pct"], reverse=True)
+    return out
+
+
+def get_universe(cfg: dict, provider, watchlists: Optional[dict] = None) -> list[str]:
+    """Symbols to scan: the configured watchlist, or every tradable US stock."""
+    if cfg.get("universe_mode", "whole_market") == "watchlist":
+        if watchlists is None:
+            from core.config import load_watchlists
+
+            watchlists = load_watchlists()
+        return resolve_tickers(cfg, watchlists)
+    return provider.list_symbols(cfg.get("assets_base_url"))
 
 
 def _parse_hhmm(text: str):
@@ -51,6 +144,9 @@ def _empty_row(ticker: str, cfg: dict, error: Optional[str], **kw) -> dict:
         "rel_volume": None,
         "volume_as_of": None,
         "volume_feed_used": cfg.get("volume_feed"),
+        "universe_mode": cfg.get("universe_mode"),
+        "stage1_gap": None,
+        "sip_prev_close": None,
         "flagged": False,
         "error": error,
     }
@@ -121,7 +217,12 @@ class PremarketMomentumScanner(Scanner):
     )
     lane = "intraday"
     default_config = {
+        "universe_mode": "whole_market",  # or "watchlist" (uses "watchlist" below)
         "watchlist": "momentum",
+        "assets_base_url": "https://paper-api.alpaca.markets",  # Trading API host (lists tradable stocks)
+        "max_stage2_candidates": 60,
+        "min_trade_age_minutes": 30,  # ignore symbols whose last trade is older than this
+        # NOTE: no ETF filter (exclude_etfs): the assets endpoint can't reliably tell ETFs apart.
         "min_rel_volume": 5.0,
         "min_gap_pct": 10.0,
         "min_price": 1.0,
@@ -143,7 +244,9 @@ class PremarketMomentumScanner(Scanner):
         "lookback_days": {"label": "History sessions to average", "min": 2, "max": 30, "step": 1},
         "min_history_days": {"label": "Minimum sessions of history", "min": 1, "max": 30, "step": 1},
         "volume_delay_minutes": {"label": "Volume delay (minutes)", "help": "15-16 on the free Alpaca plan, 0 on a paid plan", "min": 0, "max": 60, "step": 1},
-        "auto_refresh_seconds": {"label": "Auto-refresh (seconds)", "min": 15, "max": 600, "step": 15},
+        "auto_refresh_seconds": {"label": "Auto-refresh (seconds)", "help": "Each refresh of a whole-market scan costs ~26 API calls (free plan limit: 200/min)", "min": 15, "max": 600, "step": 15},
+        "max_stage2_candidates": {"label": "Max gappers to check for volume", "min": 1, "max": 200, "step": 5},
+        "min_trade_age_minutes": {"label": "Ignore trades older than (minutes)", "help": "Stale last trades are not live movers", "min": 1, "max": 600, "step": 5},
     }
     column_formats = {
         "last_price": "${:.2f}",
@@ -152,6 +255,8 @@ class PremarketMomentumScanner(Scanner):
         "volume_so_far": "{:,.0f}",
         "avg_volume_same_time": "{:,.0f}",
         "rel_volume": "{:.2f}x",
+        "stage1_gap": "{:+.2f}%",
+        "sip_prev_close": "${:.2f}",
     }
 
     # -- data fetching -------------------------------------------------------
@@ -185,32 +290,69 @@ class PremarketMomentumScanner(Scanner):
                 return float(before["close"].iloc[-1])
         return None
 
+    def _sweep(self, provider, universe, cfg, now_et):
+        """Stage 1: IEX snapshots for the whole universe in chunks. Returns (snaps, failed_chunks)."""
+        snaps, failed, ok = {}, 0, 0
+        for i in range(0, len(universe), STAGE1_CHUNK):
+            chunk = universe[i : i + STAGE1_CHUNK]
+            try:
+                snaps.update(provider.snapshots(chunk, feed=cfg["price_feed"]))
+                ok += 1
+            except (ProviderAuthError, ProviderPermissionError):
+                raise
+            except ProviderError as e:
+                log.warning("Snapshot chunk %d failed: %s", i // STAGE1_CHUNK, e)
+                failed += 1
+        if failed and not ok:
+            raise ProviderError("Could not fetch market snapshots from Alpaca")
+        return snaps, failed
+
     def run(self, tickers, config, ctx: RunContext) -> ScanOutput:
         cfg = {**self.default_config, **config}
         provider = ctx.intraday_provider or AlpacaProvider()
         if not provider.is_configured():
             return ScanOutput("not_configured", NOT_CONFIGURED_MSG)
 
+        mode = cfg["universe_mode"]
+        if mode not in ("whole_market", "watchlist"):
+            return ScanOutput("error", f'Unknown universe_mode "{mode}" (use "whole_market" or "watchlist")')
         now_et = ctx.now
         today = now_et.date()
         message = ""
+        stage1: dict[str, dict] = {}
+        counts = {}
         try:
-            snaps = provider.snapshots(tickers, feed=cfg["price_feed"])
+            if mode == "whole_market":
+                universe = get_universe(cfg, provider)
+                snaps, failed = self._sweep(provider, universe, cfg, now_et)
+                gappers = stage1_candidates(snaps, cfg, now_et)
+                cands = gappers[: int(cfg["max_stage2_candidates"])]
+                stage1 = {c["ticker"]: c for c in cands}
+                symbols = [c["ticker"] for c in cands]
+                snaps = {t: snaps[t] for t in symbols}
+                counts = {"swept": len(universe), "gappers": len(gappers), "checked": len(cands)}
+                head = f"Swept {len(universe):,} symbols; {len(gappers)} gapped >={cfg['min_gap_pct']:g}%"
+                if len(gappers) > len(cands):
+                    head += f" (checked the top {len(cands)})"
+                head_warn = f"; {failed} snapshot chunk(s) failed and were skipped" if failed else ""
+                if not symbols:
+                    return ScanOutput("ok", f"{head}; 0 flagged{head_warn}", [], [], extra={**counts, "flagged": 0, "bars": {}})
+            else:
+                symbols = list(tickers)
+                snaps = provider.snapshots(symbols, feed=cfg["price_feed"])
             volume_feed, delay = cfg["volume_feed"], cfg["volume_delay_minutes"]
             try:
-                daily, intraday = self._fetch(provider, tickers, cfg, now_et, volume_feed, delay)
+                daily, intraday = self._fetch(provider, symbols, cfg, now_et, volume_feed, delay)
             except ProviderPermissionError:
                 volume_feed, delay = "iex", 0
                 message = FALLBACK_MSG
-                daily, intraday = self._fetch(provider, tickers, cfg, now_et, volume_feed, delay)
-        except ProviderAuthError as e:
-            return ScanOutput("error", str(e))
-        except ProviderError as e:
+                daily, intraday = self._fetch(provider, symbols, cfg, now_et, volume_feed, delay)
+        except ProviderError as e:  # includes auth errors; messages never contain keys
             return ScanOutput("error", str(e))
 
         row_cfg = {**cfg, "volume_feed": volume_feed, "volume_delay_minutes": delay}
         rows, signals, today_bars = [], [], {}
-        for t in tickers:
+        for t in symbols:
             try:
                 snap = snaps.get(t) or {}
                 price = snap.get("last_price")
@@ -220,6 +362,12 @@ class PremarketMomentumScanner(Scanner):
                     rows.append(_empty_row(t, row_cfg, "no price data"))
                     continue
                 row = compute_row(t, price, prev_close, bars_df, now_et, row_cfg)
+                s1 = stage1.get(t)
+                if s1:
+                    row["stage1_gap"] = round(s1["gap_pct"], 2)
+                    row["sip_prev_close"] = prev_close
+                    if prev_close is not None and abs(prev_close - s1["prev_close"]) / s1["prev_close"] > PREV_CLOSE_MISMATCH:
+                        row["error"], row["flagged"] = MISMATCH_MSG, False
             except Exception as e:  # never let one ticker stop the scan
                 log.warning("Failed to evaluate %s: %s", t, type(e).__name__)
                 row = _empty_row(t, row_cfg, f"{type(e).__name__}: {e}")
@@ -233,7 +381,13 @@ class PremarketMomentumScanner(Scanner):
                 )
                 if bars_df is not None:
                     today_bars[t] = bars_df[pd.Index(bars_df.index.date) == today]
-        return ScanOutput("ok", message, rows, signals, extra={"bars": today_bars})
+        extra = {"bars": today_bars}
+        if mode == "whole_market":
+            counts["flagged"] = len(signals)
+            extra.update(counts)
+            parts = f"{head}; {len(signals)} flagged{head_warn}"
+            message = f"{parts}. {message}" if message else parts
+        return ScanOutput("ok", message, rows, signals, extra=extra)
 
     # -- alerts / UI -----------------------------------------------------------
 

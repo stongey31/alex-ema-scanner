@@ -25,7 +25,12 @@ class IntradayProvider:
         raise NotImplementedError
 
     def snapshots(self, symbols: list[str], feed: str = "iex") -> dict[str, dict]:
-        """{sym: {"last_price": float|None, "last_trade_time": datetime|None}}"""
+        """{sym: {"last_price": float|None, "last_trade_time": datetime|None,
+        "dailyBar": dict|None, "prevDailyBar": dict|None}}  (bars as Alpaca returns them: o,h,l,c,v,t)"""
+        raise NotImplementedError
+
+    def list_symbols(self, base_url: Optional[str] = None) -> list[str]:
+        """Every tradable US stock symbol (the whole-market universe), already filtered."""
         raise NotImplementedError
 
     def bars(

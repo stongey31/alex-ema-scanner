@@ -83,4 +83,4 @@ def test_symbols_are_chunked(monkeypatch):
     seen = []
     monkeypatch.setattr(requests, "get", lambda url, params=None, **k: seen.append(params["symbols"]) or Resp(200, {"snapshots": {}}))
     _prov().snapshots([f"S{i}" for i in range(250)])
-    assert [len(s.split(",")) for s in seen] == [100, 100, 50]
+    assert [len(s.split(",")) for s in seen] == [250]

@@ -9,7 +9,8 @@ from core.scanner_base import ET, RunContext
 from scanners.premarket_momentum import PremarketMomentumScanner, compute_row
 
 NOW = datetime(2026, 9, 30, 8, 30, tzinfo=ET)  # a Wednesday
-CFG = {**PremarketMomentumScanner.default_config, "min_gap_pct": 3.0}
+WL = {**PremarketMomentumScanner.default_config, "universe_mode": "watchlist"}
+CFG = {**WL, "min_gap_pct": 3.0}
 
 
 def _row(today_vol, hist_vol, gap_pct=4.0, cfg=CFG, sessions=10, price=10.0, bars=None):
@@ -77,7 +78,7 @@ def test_cutoff_ignores_later_bars_today_and_in_history():
 def test_run_end_to_end_with_fake_provider():
     scanner = PremarketMomentumScanner()
     prov = make_demo_provider(["AAA", "BBB", "CCC"], NOW)
-    out = scanner.run(["AAA", "BBB", "CCC"], scanner.default_config, RunContext(intraday_provider=prov, now=NOW))
+    out = scanner.run(["AAA", "BBB", "CCC"], WL, RunContext(intraday_provider=prov, now=NOW))
     assert out.status == "ok" and out.message == ""
     by = {r["ticker"]: r for r in out.rows}
     assert by["AAA"]["flagged"] and not by["BBB"]["flagged"] and not by["CCC"]["flagged"]
@@ -91,7 +92,7 @@ def test_sip_permission_error_falls_back_to_iex():
     scanner = PremarketMomentumScanner()
     prov = make_demo_provider(["AAA", "BBB", "CCC"], NOW)
     prov.permission_error_feeds = ("sip",)
-    out = scanner.run(["AAA", "BBB", "CCC"], scanner.default_config, RunContext(intraday_provider=prov, now=NOW))
+    out = scanner.run(["AAA", "BBB", "CCC"], WL, RunContext(intraday_provider=prov, now=NOW))
     assert out.status == "ok"
     assert "IEX-only volume" in out.message
     assert all(r["volume_feed_used"] == "iex" for r in out.rows)
@@ -105,7 +106,7 @@ def test_auth_error_is_status_error_without_key_text():
             raise ProviderAuthError("Alpaca rejected the API keys")
 
     prov = Rejecting({}, {})
-    out = PremarketMomentumScanner().run(["AAA"], PremarketMomentumScanner.default_config, RunContext(intraday_provider=prov, now=NOW))
+    out = PremarketMomentumScanner().run(["AAA"], WL, RunContext(intraday_provider=prov, now=NOW))
     assert out.status == "error" and "rejected" in out.message
     assert "test-key" not in out.message
 
@@ -113,7 +114,7 @@ def test_auth_error_is_status_error_without_key_text():
 def test_missing_ticker_data_is_a_row_error_not_a_crash():
     scanner = PremarketMomentumScanner()
     prov = make_demo_provider(["AAA"], NOW)
-    out = scanner.run(["AAA", "ZZZ"], scanner.default_config, RunContext(intraday_provider=prov, now=NOW))
+    out = scanner.run(["AAA", "ZZZ"], WL, RunContext(intraday_provider=prov, now=NOW))
     assert out.status == "ok" and out.rows[1]["error"]
 
 
