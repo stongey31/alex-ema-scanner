@@ -1,0 +1,9 @@
+{
+  "enabled": true,
+  "watchlist": "mega_caps",
+  "proximity_threshold_pct": 2.0,
+  "earnings_lookback_days": 7,
+  "bounce_lookback_days": 10,
+  "rsi_period": 14,
+  "rsi_oversold_threshold": 30
+}

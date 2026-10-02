@@ -1,0 +1,28 @@
+{
+  "mega_caps": [
+    "AAPL",
+    "MSFT",
+    "GOOG",
+    "AMZN",
+    "NVDA",
+    "META",
+    "TSLA",
+    "AMD",
+    "AVGO",
+    "NFLX"
+  ],
+  "momentum": [
+    "TSLA",
+    "NVDA",
+    "AMD",
+    "PLTR",
+    "SOFI",
+    "COIN",
+    "MARA",
+    "RIOT",
+    "SMCI",
+    "MSTR",
+    "HOOD",
+    "RIVN"
+  ]
+}
