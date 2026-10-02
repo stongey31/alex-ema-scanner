@@ -27,6 +27,7 @@ class ScanOutput:
     message: str = ""
     rows: list[dict] = field(default_factory=list)
     signals: list[Signal] = field(default_factory=list)
+    extra: dict = field(default_factory=dict)  # optional data for render_detail (e.g. chart bars)
 
 
 @dataclass
