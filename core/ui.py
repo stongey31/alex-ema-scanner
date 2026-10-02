@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import streamlit as st
 
-_SKIP = {"enabled", "watchlist"}
+_SKIP = {"enabled", "watchlist", "assets_base_url", "exclude_etfs"}
+UNIVERSE_MODES = ["whole_market", "watchlist"]
 
 
 def _cast(v, typ):
@@ -23,6 +24,13 @@ def settings_form(scanner, config: dict, key_prefix: str) -> dict:
         label = m.get("label", key)
         help_ = m.get("help")
         wkey = f"{key_prefix}_{key}"
+        if key == "universe_mode":
+            edited[key] = st.selectbox(
+                "Universe", UNIVERSE_MODES, index=UNIVERSE_MODES.index(value) if value in UNIVERSE_MODES else 0,
+                format_func=lambda v: "Whole market (all US stocks)" if v == "whole_market" else "Watchlist (fixed tickers)",
+                help="Whole market sweeps every tradable US stock for gappers first (~26 API calls per run).", key=wkey,
+            )
+            continue
         if isinstance(value, bool):
             edited[key] = st.checkbox(label, value=value, help=help_, key=wkey)
         elif isinstance(value, int):

@@ -16,7 +16,7 @@ import streamlit as st
 
 from core.config import ConfigError, load_scanner_config, load_watchlists, resolve_tickers
 from core.providers.alpaca import NOT_CONFIGURED_MSG, AlpacaProvider
-from core.providers.fake import make_demo_provider
+from core.providers.fake import make_demo_provider, make_demo_universe_provider
 from core.registry import BrokenScanner, discover_scanners
 from core.scanner_base import ET, RunContext, ScanOutput
 from core.secrets import has_secret
@@ -35,11 +35,21 @@ def _show_results(scanner, out: ScanOutput, cfg: dict, fake: bool = False) -> No
         st.error(out.message)
         return
     if out.message:
-        st.warning(out.message)
+        if out.message.startswith("Swept") and "skipped" not in out.message and "IEX-only" not in out.message:
+            st.info(out.message)
+        else:
+            st.warning(out.message)
     flagged_n = sum(1 for r in out.rows if r.get("flagged"))
-    c1, c2 = st.columns(2)
-    c1.metric("Total Scanned", len(out.rows))
-    c2.metric("Flagged", flagged_n)
+    swept = (out.extra or {}).get("swept")
+    if swept is not None:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Symbols swept", f"{swept:,}")
+        c2.metric("Gappers checked for volume", len(out.rows))
+        c3.metric("Flagged", flagged_n)
+    else:
+        c1, c2 = st.columns(2)
+        c1.metric("Total Scanned", len(out.rows))
+        c2.metric("Flagged", flagged_n)
 
     df = scanner.table(out)
     if len(df) == len(out.rows):
@@ -57,7 +67,8 @@ def _show_results(scanner, out: ScanOutput, cfg: dict, fake: bool = False) -> No
 
 
 def _run(scanner, tickers, cfg, ctx) -> ScanOutput:
-    with st.spinner(f"Scanning {len(tickers)} ticker(s)..."):
+    whole = cfg.get("universe_mode") == "whole_market"
+    with st.spinner("Sweeping the whole market..." if whole else f"Scanning {len(tickers)} ticker(s)..."):
         try:
             return scanner.run(tickers, cfg, ctx)
         except Exception as e:  # keep the page alive
@@ -71,9 +82,14 @@ def render_tab(scanner, base_cfg: dict, watchlists: dict) -> None:
 
     with st.expander("Settings (this session only - not saved)"):
         cfg = settings_form(scanner, base_cfg, key_prefix=sid)
-    default_tickers = resolve_tickers(base_cfg, watchlists)
-    raw = st.text_input("Tickers (comma-separated, this session only)", value=", ".join(default_tickers), key=f"tickers_{sid}")
-    tickers = list(dict.fromkeys(t.strip().upper() for t in raw.split(",") if t.strip()))
+    whole = cfg.get("universe_mode") == "whole_market"
+    if whole:
+        st.caption("Scanning whole market (~12.7k symbols): gappers first, then a volume check on the survivors.")
+        tickers = []
+    else:
+        default_tickers = resolve_tickers(base_cfg, watchlists)
+        raw = st.text_input("Tickers (comma-separated, this session only)", value=", ".join(default_tickers), key=f"tickers_{sid}")
+        tickers = list(dict.fromkeys(t.strip().upper() for t in raw.split(",") if t.strip()))
 
     intraday = scanner.lane == "intraday"
     demo = False
@@ -82,16 +98,20 @@ def render_tab(scanner, base_cfg: dict, watchlists: dict) -> None:
         if not AlpacaProvider().is_configured():
             st.info(NOT_CONFIGURED_MSG)
             demo = st.checkbox("Show demo with FAKE data", key=f"demo_{sid}")
-        auto = st.toggle("Auto-refresh while this page is open", value=False, key=f"auto_{sid}")
+        auto = st.toggle(
+            "Auto-refresh while this page is open", value=False, key=f"auto_{sid}",
+            help="Off by default. In whole-market mode each refresh costs ~26 API calls (the free plan allows 200 per minute).",
+        )
 
     def make_ctx():
         if demo:
             now = datetime.now(ET).replace(hour=8, minute=30, second=0, microsecond=0)
-            return RunContext(intraday_provider=make_demo_provider(tickers, now), now=now)
+            prov = make_demo_universe_provider(now) if whole else make_demo_provider(tickers, now)
+            return RunContext(intraday_provider=prov, now=now)
         return RunContext()
 
     def execute():
-        if not tickers:
+        if not whole and not tickers:
             st.error("Add at least one ticker before scanning.")
             return
         st.session_state[f"out_{sid}"] = _run(scanner, tickers, cfg, make_ctx())
