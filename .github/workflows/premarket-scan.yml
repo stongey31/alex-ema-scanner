@@ -1,0 +1,69 @@
+name: Pre-market Momentum Scan
+
+# Runs on weekdays in the pre-market window and alerts on NEW hits only.
+#
+# Two cron lines because GitHub cron is in UTC and does not follow US
+# Daylight Saving Time: 12:00 UTC = 8:00am ET in summer (EDT) and 7:00am ET in
+# winter (EST); 13:00 UTC = 9:00am EDT / 8:00am EST. The runner's
+# --et-window flag (07:45-09:29 New York time) quietly does nothing when a run
+# lands outside the window, so only the right one acts each season.
+#
+# HONEST LIMITS:
+#  * GitHub scheduled workflows are best-effort and are often delayed by
+#    5-30+ minutes at busy times (sometimes skipped). Don't expect an exact
+#    minute. This is NOT a real-time, per-minute scanner.
+#  * Each trigger gives one scan, so there is roughly one chance per day, not
+#    continuous monitoring. Always-on alerting is out of scope for this setup.
+#  * GitHub automatically DISABLES scheduled workflows in a repo with no
+#    activity for 60 days. If alerts stop, open the repo's Actions tab, pick
+#    this workflow and click "Enable workflow" (see README).
+on:
+  schedule:
+    - cron: "0 12 * * 1-5"
+    - cron: "0 13 * * 1-5"
+  workflow_dispatch: {}
+
+# Needed so the job can commit data/alert_log.json back to the repo.
+permissions:
+  contents: write
+
+# Never let two scans overlap and race on the alert log (shared with the daily scan).
+concurrency:
+  group: alert-log
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run pre-market scanner
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_API_SECRET: ${{ secrets.ALPACA_API_SECRET }}
+        run: python runner.py --lane intraday --et-window 07:45-09:29
+
+      - name: Save alert log
+        run: |
+          if git diff --quiet -- data/alert_log.json; then
+            echo "No new alerts; nothing to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/alert_log.json
+          git commit -m "Update alert log [skip ci]"
+          # Pick up any edits Alex made while the scan was running.
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"

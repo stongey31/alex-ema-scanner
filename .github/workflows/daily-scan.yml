@@ -14,7 +14,7 @@ on:
     - cron: "30 21 * * 1-5"
   workflow_dispatch: {}
 
-# Needed so the job can commit data/watchlist.json's "alerted" dedup log
+# Needed so the job can commit the data/alert_log.json dedup log
 # back to the repo -- without this the log is lost when the runner shuts
 # down and the same bounce would re-alert every day.
 permissions:
@@ -22,7 +22,7 @@ permissions:
 
 # Never let two scans overlap and race on the alert log.
 concurrency:
-  group: daily-scan
+  group: alert-log
   cancel-in-progress: false
 
 jobs:
@@ -35,7 +35,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Install dependencies
         run: pip install -r requirements.txt
@@ -43,18 +43,18 @@ jobs:
       - name: Run scanner
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: python runner.py
+        run: python runner.py --lane daily
 
       - name: Save alert log
         run: |
-          if git diff --quiet -- data/watchlist.json; then
+          if git diff --quiet -- data/alert_log.json; then
             echo "No new alerts; nothing to commit."
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/watchlist.json
+          git add data/alert_log.json
           git commit -m "Update alert log [skip ci]"
-          # Pick up any watchlist edits Alex made while the scan was running.
+          # Pick up any edits Alex made while the scan was running.
           git pull --rebase origin "${GITHUB_REF_NAME}"
           git push origin "HEAD:${GITHUB_REF_NAME}"

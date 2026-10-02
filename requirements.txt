@@ -1,6 +1,10 @@
-yfinance
-pandas
-requests
-streamlit
-plotly
-python-dotenv
+pandas==3.0.6
+numpy==2.5.3
+requests==2.34.2
+streamlit==1.64.0
+plotly==7.1.0
+python-dotenv==1.2.4
+tzdata==2026.4
+# yfinance is deliberately NOT pinned (only a minimum): Yahoo changes its
+# endpoints often and old yfinance versions stop working, so we want fixes.
+yfinance>=1.7.0
