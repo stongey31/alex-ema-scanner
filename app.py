@@ -44,7 +44,7 @@ def _show_results(scanner, out: ScanOutput, cfg: dict, fake: bool = False) -> No
     if swept is not None:
         c1, c2, c3 = st.columns(3)
         c1.metric("Symbols swept", f"{swept:,}")
-        c2.metric("Gappers checked for volume", len(out.rows))
+        c2.metric((out.extra or {}).get("candidates_label", "Gappers checked for volume"), len(out.rows))
         c3.metric("Flagged", flagged_n)
     else:
         c1, c2 = st.columns(2)
@@ -84,7 +84,10 @@ def render_tab(scanner, base_cfg: dict, watchlists: dict) -> None:
         cfg = settings_form(scanner, base_cfg, key_prefix=sid)
     whole = cfg.get("universe_mode") == "whole_market"
     if whole:
-        st.caption("Scanning whole market (~12.7k symbols): gappers first, then a volume check on the survivors.")
+        st.caption(
+            getattr(scanner, "whole_market_caption", None)
+            or "Scanning whole market (~12.7k symbols): gappers first, then a volume check on the survivors."
+        )
         tickers = []
     else:
         default_tickers = resolve_tickers(base_cfg, watchlists)

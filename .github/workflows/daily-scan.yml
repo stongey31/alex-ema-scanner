@@ -43,6 +43,10 @@ jobs:
       - name: Run scanner
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          # Needed by the Early Runner scanner (whole-market data). Harmless if unset:
+          # that scanner then reports "not configured" and the others still run.
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_API_SECRET: ${{ secrets.ALPACA_API_SECRET }}
         run: python runner.py --lane daily
 
       - name: Save alert log

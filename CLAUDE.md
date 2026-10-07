@@ -98,3 +98,11 @@ volume (Alpaca data). See README.md for the logic definitions and setup checklis
   bars, not counted as 0, which can inflate the average slightly for thin names.
 
 - **`worktrees/` was not in `.gitignore` originally**; it is now.
+
+- **`scanners/early_runner.py`** is a daily-lane scanner that builds its own whole-market universe (like
+  `premarket_momentum`) and uses `ctx.intraday_provider or AlpacaProvider()`. It skips a stock if the daily
+  bars' last date differs from the snapshot's `dailyBar` date (stale bars), uses yfinance only for stocks that
+  already passed the volume/trend test (`_fundamentals`, monkeypatched in tests), and only flags when BOTH market
+  cap and float are known and small. `app.py` reads optional `candidates_label` (in `ScanOutput.extra`) and
+  `whole_market_caption` (scanner attribute). On Windows, `tests/test_pluggability.py` needs `PYTHONUTF8=1`
+  (a console-encoding issue with the warning sign), and a deep virtualenv path can silently drop Streamlit's `proto/` folder.

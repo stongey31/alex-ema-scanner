@@ -396,3 +396,20 @@ If `DISCORD_WEBHOOK_URL` is unset, alerts are logged to the console instead of
 failing. `requirements.txt` pins exact versions (except `yfinance`, which only
 has a minimum so Yahoo-compatibility fixes get picked up). The app targets
 Python 3.12.
+
+## Early Runner Setup scanner (`scanners/early_runner.py`)
+
+Whole-market scan, once a day after the close, for small, low-float stocks breaking out on heavy volume
+(the profile of stocks that went on big runs). A research list, not a buy signal: most flags will fizzle.
+
+1. **Sweep** (Alpaca snapshots): closed up at least 3% and costs at least $1.
+2. **Volume and trend** (daily bars): volume at least 5x the prior-30-day average, close above the
+   highest high of the prior 60 sessions, and above the 10- and 20-day EMA.
+3. **Size** (yfinance): market cap under $500M AND float under 25M shares. Short interest is shown as a bonus.
+   If yfinance has no data, the stock shows as "unknown" in the table but is not flagged and sends no alert.
+
+Change any number in `data/config/early_runner.json`, for example `{"min_rel_volume": 8, "max_float_m": 15}`.
+Needs `ALPACA_API_KEY` / `ALPACA_API_SECRET` as **GitHub Actions secrets** too (the daily workflow passes them);
+without them this scanner reports "not configured" and the others keep running. Limits: the free Alpaca plan only
+reports IEX volume (volume *ratios* are meaningful, absolute volume is not); float and market cap come from
+yfinance (free, unofficial, sometimes missing); revenue growth and catalysts are not scanned.
